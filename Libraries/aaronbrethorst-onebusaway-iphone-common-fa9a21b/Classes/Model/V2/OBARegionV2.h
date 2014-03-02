@@ -13,19 +13,22 @@
     NSMutableArray *_bounds;
 }
 
-@property (nonatomic, retain) NSString * siriBaseUrl;
-@property (nonatomic, retain) NSString * obaVersionInfo;
-@property (nonatomic, retain) NSString * language;
-@property (nonatomic, retain) NSArray * bounds;
-@property (nonatomic, retain) NSString * contactEmail;
-@property (nonatomic, retain) NSString * twitterUrl;
-@property (nonatomic, retain) NSString * obaBaseUrl;
-@property (nonatomic, retain) NSString * regionName;
+@property (nonatomic, strong) NSString * siriBaseUrl;
+@property (nonatomic, strong) NSString * obaVersionInfo;
+@property (nonatomic, strong) NSString * language;
+@property (nonatomic, strong) NSArray * bounds;
+@property (nonatomic, strong) NSString * contactEmail;
+@property (nonatomic, strong) NSString * twitterUrl;
+@property (nonatomic, strong) NSString * obaBaseUrl;
+@property (nonatomic, strong) NSString * facebookUrl;
+@property (nonatomic, strong) NSString * regionName;
+@property (nonatomic, strong) NSString * stopInfoUrl;
 
 @property (nonatomic) BOOL supportsSiriRealtimeApis;
 @property (nonatomic) BOOL supportsObaRealtimeApis;
 @property (nonatomic) BOOL supportsObaDiscoveryApis;
 @property (nonatomic) BOOL active;
+@property (nonatomic) BOOL experimental;
 @property (nonatomic) NSInteger id_number;
 
 - (void)addBound:(OBARegionBoundsV2*)bound;

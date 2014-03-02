@@ -30,18 +30,22 @@
 #import "OBATripDetailsViewController.h"
 #import "OBAReportProblemViewController.h"
 #import "OBAStopIconFactory.h"
+#import "OBARegionV2.h"
 
 #import "OBASearchController.h"
 #import "OBASphericalGeometryLibrary.h"
 #import "MKMapView+oba_Additions.h"
 #import "UITableViewController+oba_Additions.h"
+#import "OBABookmarkGroup.h"
+#import "OBAStopWebViewController.h"
 
 static const double kNearbyStopRadius = 200;
+static NSString *kOBANoStopInformationURL = @"http://stopinfo.pugetsound.onebusaway.org/testing";
+static NSString *kOBADidShowStopInfoHintDefaultsKey = @"OBADidShowStopInfoHintDefaultsKey";
 
 @interface OBAGenericStopViewController ()
-@property(strong,readwrite) OBAApplicationDelegate * _appContext;
+@property(strong,readwrite) OBAApplicationDelegate * _appDelegate;
 @property(strong,readwrite) NSString * stopId;
-@property NSUInteger minutesAfter;
 
 @property(strong) id<OBAModelServiceRequest> request;
 @property(strong) NSTimer *timer;
@@ -50,14 +54,14 @@ static const double kNearbyStopRadius = 200;
 
 @property(strong) OBAProgressIndicatorView * progressView;
 @property(strong) OBAServiceAlertsModel * serviceAlerts;
+@property (nonatomic, strong) EMHint *hint;
 @end
 
-@interface OBAGenericStopViewController (Private)
+@interface OBAGenericStopViewController ()
 
 // Override point for extension classes
 - (void)customSetup;
 
-- (void)refresh;
 - (void)clearPendingRequest;
 - (void)didBeginRefresh;
 - (void)didFinishRefresh;
@@ -81,11 +85,11 @@ static const double kNearbyStopRadius = 200;
 
 @implementation OBAGenericStopViewController
 
-- (id) initWithApplicationContext:(OBAApplicationDelegate*)appContext {
+- (id) initWithApplicationDelegate:(OBAApplicationDelegate*)appDelegate {
 
     if (self = [super initWithStyle:UITableViewStylePlain]) {
 
-        _appContext = appContext;
+        _appDelegate = appDelegate;
         
         _minutesBefore = 5;
         _minutesAfter = 35;
@@ -94,12 +98,12 @@ static const double kNearbyStopRadius = 200;
         _showServiceAlerts = YES;
         _showActions = YES;
         
-        _arrivalCellFactory = [[OBAArrivalEntryTableViewCellFactory alloc] initWithAppContext:_appContext tableView:self.tableView];
+        _arrivalCellFactory = [[OBAArrivalEntryTableViewCellFactory alloc] initWithappDelegate:_appDelegate tableView:self.tableView];
         _arrivalCellFactory.showServiceAlerts = YES;
 
         _serviceAlerts = [[OBAServiceAlertsModel alloc] init];
 
-        _progressView = [[OBAProgressIndicatorView alloc] initWithFrame:CGRectMake(0, 0, 160, 33)];
+        _progressView = [[OBAProgressIndicatorView alloc] initWithFrame:CGRectMake(0, 0, 160, 44)];
         [self.navigationItem setTitleView:_progressView];
         
         UIBarButtonItem * refreshItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh target:self action:@selector(onRefreshButton:)];
@@ -108,18 +112,17 @@ static const double kNearbyStopRadius = 200;
         _allArrivals = [[NSMutableArray alloc] init];
         _filteredArrivals = [[NSMutableArray alloc] init];
         _showFilteredArrivals = YES;
-        
-        self.navigationItem.title = NSLocalizedString(@"Stop",@"stop");
-        
 
+        self.navigationItem.title = NSLocalizedString(@"Stop",@"stop");
+        self.tableView.backgroundColor = [UIColor whiteColor];
         
         [self customSetup];
     }
     return self;
 }
 
-- (id) initWithApplicationContext:(OBAApplicationDelegate*)appContext stopId:(NSString*)stopId {
-    if (self = [self initWithApplicationContext:appContext]) {
+- (id) initWithApplicationDelegate:(OBAApplicationDelegate*)appDelegate stopId:(NSString*)stopId {
+    if (self = [self initWithApplicationDelegate:appDelegate]) {
         self.stopId = stopId;
     }
     return self;
@@ -136,15 +139,142 @@ static const double kNearbyStopRadius = 200;
         UINib *xibFile = [UINib nibWithNibName:@"OBAGenericStopViewController" bundle:nil];
         [xibFile instantiateWithOwner:self options:nil];
         self.tableView.tableHeaderView = self.tableHeaderView;
+        self.mapView.accessibilityElementsHidden = YES;
+
+        self.stopRoutes = [[OBAShadowLabel alloc] initWithFrame:CGRectMake(0, 77, 320, 18) rate:60 andFadeLength:10];
+        self.stopRoutes.marqueeType = MLContinuous;
+        self.stopRoutes.backgroundColor = [UIColor clearColor];
+        self.stopRoutes.textColor = [UIColor whiteColor];
+        self.stopRoutes.font = [UIFont boldSystemFontOfSize:14];
+        self.stopRoutes.continuousMarqueeExtraBuffer = 80;
+        self.stopRoutes.tapToScroll = YES;
+        self.stopRoutes.animationDelay = 0;
+        self.stopRoutes.animationCurve = UIViewAnimationOptionCurveLinear;
+        [self.tableHeaderView addSubview:self.stopRoutes];
+
+        self.stopNumber = [[OBAShadowLabel alloc] initWithFrame:CGRectMake(10, 40, 320, 15)];
+        self.stopNumber.backgroundColor = [UIColor clearColor];
+        self.stopNumber.textColor = [UIColor whiteColor];
+        self.stopNumber.font = [UIFont systemFontOfSize:13];
+        [self.tableHeaderView addSubview:self.stopNumber];
+        
+        self.stopName = [[OBAShadowLabel alloc] initWithFrame:CGRectMake(0, 53, 275, 27) rate:60 andFadeLength:10];
+        self.stopName.marqueeType = MLContinuous;
+        self.stopName.backgroundColor = [UIColor clearColor];
+        self.stopName.textColor = [UIColor whiteColor];
+        self.stopName.font = [UIFont boldSystemFontOfSize:19];
+        self.stopName.continuousMarqueeExtraBuffer = 80;
+        self.stopName.tapToScroll = YES;
+        self.stopName.animationDelay = 0;
+        self.stopName.animationCurve = UIViewAnimationOptionCurveLinear;
+        [self.view addSubview:self.stopName];
+
+        OBARegionV2 *region = _appDelegate.modelDao.region;
+        if (![region.stopInfoUrl isEqual:[NSNull null]]) {
+            self.stopInfoButton = [UIButton buttonWithType:UIButtonTypeInfoLight];
+            [self.stopInfoButton setFrame:CGRectMake(285, 53, 25, 25)];
+            [self.stopInfoButton addTarget:self
+                               action:@selector(openURLS)
+                     forControlEvents:UIControlEventTouchUpInside];
+            self.stopInfoButton.tintColor = [UIColor whiteColor];
+            self.stopInfoButton.accessibilityLabel = NSLocalizedString(@"About this stop, button.", @"");
+            self.stopInfoButton.accessibilityHint = NSLocalizedString(@"Double tap for stop landmark information.", @"");
+            self.stopInfoButton.hidden = YES;
+            [self.tableHeaderView addSubview:self.stopInfoButton];
+        }
+        
+        self.tableHeaderView.backgroundColor = OBAGREENBACKGROUND;
+        [self.tableHeaderView addSubview:self.stopName];
+        
+        UIView *legalView = nil;
+        
+        for (UIView *subview in self.mapView.subviews) {
+            if ([subview isKindOfClass:[UILabel class]]) {
+                legalView = subview;
+                break;
+            }
+        }
+        legalView.frame = CGRectMake(290, 4, legalView.frame.size.width, legalView.frame.size.height);
+        
         [self hideEmptySeparators];
     }
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    
+    if ([self shouldShowHint]) {
+        [self showHint];
+    }
+}
+
+- (void)openURLS {
+    
+    OBARegionV2 *region = _appDelegate.modelDao.region;
+    
+    if (region) {
+        
+        NSString *url;
+        OBAStopV2 *stop = _result.stop;
+        NSString *stopFinderBaseUrl = region.stopInfoUrl;
+        
+        NSString *hiddenPreferenceUserId = @"OBAApplicationUserId";
+        NSString *userID = [[NSUserDefaults standardUserDefaults] stringForKey:hiddenPreferenceUserId];
+        
+        if (![region.stopInfoUrl isEqual:[NSNull null]]) {
+            url = [NSString stringWithFormat:@"%@/busstops/%@", stopFinderBaseUrl, stop.stopId];
+            if (userID.length > 0) {
+                url = [NSString stringWithFormat:@"%@?userid=%@", url, userID];
+                if (stop.direction.length > 0) {
+                    url = [NSString stringWithFormat:@"%@&direction=%@", url, stop.direction];
+                }
+            }
+            else if (stop.direction.length > 0) {
+                url = [NSString stringWithFormat:@"%@?direction=%@", url, stop.direction];
+            }
+        }
+        else {
+            url = kOBANoStopInformationURL;
+        }
+        [TestFlight passCheckpoint:[NSString stringWithFormat:@"Loaded StopInfo from %@", region.regionName]];
+        
+        
+        if (SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(@"6.0.0")) {
+            OBAStopWebViewController *webViewController = [[OBAStopWebViewController alloc] initWithURL:[NSURL URLWithString:url]];
+            [self.navigationController pushViewController:webViewController animated:YES];
+        } else {
+            [[UIApplication sharedApplication] openURL:[NSURL URLWithString: url]];
+        }
+    }
+    [[GAI sharedInstance].defaultTracker
+             send:[[GAIDictionaryBuilder createEventWithCategory:@"ui_action"
+                                                          action:@"button_press"
+                                                           label:[NSString stringWithFormat:@"Loaded StopInfo from %@", region.regionName]
+                                                           value:nil] build]];
 }
 
 - (void)viewDidUnload {
     self.tableHeaderView = nil;
     self.tableView.tableHeaderView = nil;
-    
+    [self setStopRoutes:nil];
     [super viewDidUnload];
+}
+
+- (OBABookmarkV2*)existingBookmark {
+    OBAStopV2 *stop = _result.stop;
+    for (OBABookmarkV2 *bm in [_appDelegate.modelDao bookmarks]) {
+        if ([bm.stopIds containsObject:stop.stopId]) {
+            return bm;
+        }
+    }
+    for (OBABookmarkGroup *group in [_appDelegate.modelDao bookmarkGroups]) {
+        for (OBABookmarkV2 *bm in group.bookmarks) {
+            if ([bm.stopIds containsObject:stop.stopId]) {
+                return bm;
+            }
+        }
+    }
+    return nil;
 }
 
 - (OBAStopSectionType) sectionTypeForSection:(NSUInteger)section {
@@ -181,6 +311,53 @@ static const double kNearbyStopRadius = 200;
     return OBAStopSectionTypeNone;
 }
 
+#pragma mark Stop Info Hint
+
+- (NSArray *)hintStateRectsToHint:(id)hintState {
+    return @[ [NSValue valueWithCGRect:CGRectMake(297, 129, 30, 30)] ];
+}
+
+- (UIView *)hintStateViewForDialog:(id)hintState {
+    NSString *message = NSLocalizedString(@"Tap here to learn and share useful information about this stop", @"EMHint label");
+    NSString *accessMessage = NSLocalizedString(@"Access information about bus stops through the stop info button found after the name of the stop. Double tap to dismiss this message.", @"EMHint accessibility label");
+    
+    UILabel *label = [[UILabel alloc] initWithFrame:CGRectZero];
+    CGSize sz = [message sizeWithFont:label.font constrainedToSize:CGSizeMake(250, 1000)];
+    
+    CGRect frame = CGRectMake(floorf(150 - sz.width/2),
+                              floorf(250 - sz.height/2),
+                              floorf(sz.width + 5),
+                              floorf(sz.height + 10));
+    label.frame = frame;
+    label.autoresizingMask = (UIViewAutoresizingFlexibleTopMargin
+                                | UIViewAutoresizingFlexibleRightMargin
+                                | UIViewAutoresizingFlexibleLeftMargin
+                                | UIViewAutoresizingFlexibleBottomMargin);
+    label.backgroundColor = [UIColor clearColor];
+    label.textColor = [UIColor whiteColor];
+    label.numberOfLines = 0;
+    label.lineBreakMode = UILineBreakModeWordWrap;
+    label.text = message;
+    label.accessibilityLabel = accessMessage;
+    
+    return label;
+}
+
+- (BOOL)shouldShowHint {
+    BOOL didShowHintAlready = [[NSUserDefaults standardUserDefaults] boolForKey:kOBADidShowStopInfoHintDefaultsKey];
+    OBARegionV2 *region = _appDelegate.modelDao.region;
+    BOOL validStopInfoRegion = ![region.stopInfoUrl isEqual:[NSNull null]];
+    return (!didShowHintAlready && validStopInfoRegion);
+}
+
+- (void)showHint {
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kOBADidShowStopInfoHintDefaultsKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    self.hint = [[EMHint alloc] init];
+    self.hint.hintDelegate = self;
+    [self.hint presentModalMessage:@"Tap here to view and submit more information about this stop with the new Stop Info service" where:self.view.superview];
+}
+
 #pragma mark OBANavigationTargetAware
 
 - (OBANavigationTarget*) navigationTarget {
@@ -202,7 +379,23 @@ static const double kNearbyStopRadius = 200;
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(willEnterForeground) name:UIApplicationWillEnterForegroundNotification object:nil];
     
+    self.navigationItem.title = @"Stop";
+    
     [self refresh];
+
+    [TestFlight passCheckpoint:[NSString stringWithFormat:@"View: %@", [self class]]];
+    [[GAI sharedInstance].defaultTracker set:kGAIScreenName
+                                       value:[NSString stringWithFormat:@"View: %@", [self class]]];
+    [[GAI sharedInstance].defaultTracker
+     send:[[GAIDictionaryBuilder createAppView] build]];
+    if (UIAccessibilityIsVoiceOverRunning()){
+        [TestFlight passCheckpoint:[NSString stringWithFormat:@"Loaded view: %@ using VoiceOver", [self class]]];
+        [[GAI sharedInstance].defaultTracker
+            send:[[GAIDictionaryBuilder createEventWithCategory:@"accessibility"
+                                                         action:@"voiceover_on"
+                                                          label:@"VoiceOver Running"
+                                                          value:nil] build]];
+    }
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -249,7 +442,7 @@ static const double kNearbyStopRadius = 200;
     [_progressView setInProgress:YES progress:progress];
 }
 
-#pragma mark 
+#pragma mark MapView
 
 - (MKAnnotationView *)mapView:(MKMapView *)mapView viewForAnnotation:(id<MKAnnotation>)annotation {
     
@@ -264,14 +457,12 @@ static const double kNearbyStopRadius = 200;
         }
         view.canShowCallout = NO;
         
-
-        OBAStopIconFactory * stopIconFactory = self.appContext.stopIconFactory;
+        OBAStopIconFactory * stopIconFactory = self.appDelegate.stopIconFactory;
         view.image = [stopIconFactory getIconForStop:stop];
         return view;
     }
     return nil;
 }
-
 
 #pragma mark - UITableViewDelegate and UITableViewDataSource
 
@@ -300,18 +491,19 @@ static const double kNearbyStopRadius = 200;
         case OBAStopSectionTypeArrivals: {
             NSInteger arrivalRows = self.showFilteredArrivals ? self.filteredArrivals.count : self.allArrivals.count;
             if (arrivalRows > 0) {
-                return arrivalRows;
+                return arrivalRows + 1;
             }
             else {
-                // for a 'no arrivals in the next 30 minutes' message
-                return 1;
+                // for a 'no arrivals in the next 35 minutes' message
+                // for 'load next arrivals' message
+                return 2;
             }
         }
         case OBAStopSectionTypeFilter: {
             return 1;
         }
         case OBAStopSectionTypeActions: {
-            return 4;
+            return 5;
         }
         default: {
             return 0;
@@ -413,21 +605,16 @@ static const double kNearbyStopRadius = 200;
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section
 {
     UIView *view = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 30)];
-    view.backgroundColor = OBARGBCOLOR(240, 240, 240);
+    view.backgroundColor = OBAGREENBACKGROUND;
     return view;
 }
--(CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath
 {
     if ([self sectionTypeForSection:indexPath.section] == OBAStopSectionTypeArrivals) {
         return 50;
     }
     return 44;
 }
-
-@end
-
-
-@implementation OBAGenericStopViewController (Private)
 
 - (void) customSetup {
     
@@ -438,7 +625,7 @@ static const double kNearbyStopRadius = 200;
     [self didBeginRefresh];
     
     [self clearPendingRequest];
-    _request = [_appContext.modelService requestStopWithArrivalsAndDeparturesForId:_stopId withMinutesBefore:_minutesBefore withMinutesAfter:_minutesAfter withDelegate:self withContext:nil];
+    _request = [_appDelegate.modelService requestStopWithArrivalsAndDeparturesForId:_stopId withMinutesBefore:_minutesBefore withMinutesAfter:_minutesAfter withDelegate:self withContext:nil];
     _timer = [NSTimer scheduledTimerWithTimeInterval:30 target:self selector:@selector(refresh) userInfo:nil repeats:YES];
 }
      
@@ -453,10 +640,30 @@ static const double kNearbyStopRadius = 200;
 
 - (void) didBeginRefresh {
     self.navigationItem.rightBarButtonItem.enabled = NO;
+    NSArray * arrivals = _showFilteredArrivals ? _filteredArrivals : _allArrivals;
+    UITableViewCell *cell;
+    if (arrivals.count == 0) {
+        cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:1 inSection:0]];
+    } else {
+        cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:arrivals.count inSection:0]];
+    }
+    cell.userInteractionEnabled = NO;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    cell.textLabel.textColor = [UIColor lightGrayColor];
 }
 
 - (void) didFinishRefresh {
     self.navigationItem.rightBarButtonItem.enabled = YES;
+    NSArray * arrivals = _showFilteredArrivals ? _filteredArrivals : _allArrivals;
+    UITableViewCell *cell;
+    if (arrivals.count == 0) {
+        cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:1 inSection:0]];
+    } else {
+        cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:arrivals.count inSection:0]];
+    }
+    cell.userInteractionEnabled = YES;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    cell.textLabel.textColor = [UIColor blackColor];
 }
 
 - (NSUInteger) sectionIndexForSectionType:(OBAStopSectionType)section {
@@ -500,22 +707,29 @@ static const double kNearbyStopRadius = 200;
 
 - (UITableViewCell*)tableView:(UITableView*)tableView predictedArrivalCellForRowAtIndexPath:(NSIndexPath*)indexPath {
     NSArray * arrivals = _showFilteredArrivals ? _filteredArrivals : _allArrivals;
-    
-    if( [arrivals count] == 0 ) {
+
+    if ((arrivals.count == 0 && indexPath.row == 1) || (arrivals.count == indexPath.row && arrivals.count > 0)) {
         UITableViewCell * cell = [UITableViewCell getOrCreateCellForTableView:tableView];
-        cell.textLabel.text = NSLocalizedString(@"No arrivals in the next 30 minutes",@"[arrivals count] == 0");
+        cell.textLabel.text = NSLocalizedString(@"Load more arrivals",@"load more arrivals");
         cell.textLabel.textAlignment = UITextAlignmentCenter;
-        cell.textLabel.font = [UIFont boldSystemFontOfSize:18];
+        cell.textLabel.font = [UIFont systemFontOfSize:18];
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        return cell;
+    } else if(arrivals.count == 0 ) {
+        UITableViewCell * cell = [UITableViewCell getOrCreateCellForTableView:tableView];
+        cell.textLabel.text = [NSString stringWithFormat:NSLocalizedString(@"No arrivals in the next %i minutes",@"[arrivals count] == 0"), self.minutesAfter];
+        cell.textLabel.textAlignment = UITextAlignmentCenter;
+        cell.textLabel.font = [UIFont systemFontOfSize:18];
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         cell.accessoryType = UITableViewCellAccessoryNone;
         return cell;
-    }
-    else {
+    } else {
 
         OBAArrivalAndDepartureV2 * pa = arrivals[indexPath.row];
         OBAArrivalEntryTableViewCell * cell = [_arrivalCellFactory createCellForArrivalAndDeparture:pa];
         cell.selectionStyle = UITableViewCellSelectionStyleBlue;
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+       
         return cell;
     }
 }
@@ -546,7 +760,7 @@ static const double kNearbyStopRadius = 200;
     
     UITableViewCell * cell = [UITableViewCell getOrCreateCellForTableView:tableView];
 
-    cell.textLabel.textAlignment = UITextAlignmentCenter;
+    cell.textLabel.textAlignment = UITextAlignmentLeft;
     cell.textLabel.font = [UIFont systemFontOfSize:18];
     cell.selectionStyle = UITableViewCellSelectionStyleBlue;
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
@@ -554,15 +768,22 @@ static const double kNearbyStopRadius = 200;
     
     switch(indexPath.row) {
         case 0: {
-            cell.textLabel.text = NSLocalizedString(@"Add to Bookmarks",@"case 0");
+            if ([self existingBookmark]) {
+                cell.textLabel.text = NSLocalizedString(@"Edit Bookmark",@"case 0 edit");
+            } else {
+                cell.textLabel.text = NSLocalizedString(@"Add to Bookmarks",@"case 0");
+            }
             break;
         }
         case 1: {
-            cell.textLabel.text = NSLocalizedString(@"Filter & Sort Routes",@"case 1");
-
+            cell.textLabel.text = NSLocalizedString(@"Report a Problem",@"self.navigationItem.title");
             break;
         }
         case 2: {
+            cell.textLabel.text = NSLocalizedString(@"About This Stop",@"case 2");
+            break;
+        }
+        case 3: {
             if (_serviceAlerts.totalCount == 0) {
                 cell.textLabel.text = @"Service Alerts";
             }
@@ -585,8 +806,8 @@ static const double kNearbyStopRadius = 200;
             return cell;
             break;
         }
-        case 3: {
-            cell.textLabel.text = NSLocalizedString(@"Report a Problem",@"self.navigationItem.title");
+        case 4: {
+            cell.textLabel.text = NSLocalizedString(@"Filter & Sort Routes",@"case 1");
             break;
         }
     }
@@ -596,14 +817,18 @@ static const double kNearbyStopRadius = 200;
 
 - (void)tableView:(UITableView *)tableView didSelectServiceAlertRowAtIndexPath:(NSIndexPath *)indexPath {
     NSArray * situations = _result.situations;
-    [OBAPresentation showSituations:situations withAppContext:_appContext navigationController:self.navigationController args:nil];
+    [OBAPresentation showSituations:situations withappDelegate:_appDelegate navigationController:self.navigationController args:nil];
 }
 
 - (void)tableView:(UITableView *)tableView didSelectTripRowAtIndexPath:(NSIndexPath *)indexPath {
     NSArray * arrivals = _showFilteredArrivals ? _filteredArrivals : _allArrivals;
-    if ( 0 <= indexPath.row && indexPath.row < [arrivals count] ) {
+    if ((arrivals.count == 0 && indexPath.row == 1) || (arrivals.count == indexPath.row && arrivals.count > 0)) {
+        [self.tableView deselectRowAtIndexPath:indexPath animated:YES];
+        self.minutesAfter += 30;
+        [self refresh];
+    } else if ( 0 <= indexPath.row && indexPath.row < arrivals.count ) {
         OBAArrivalAndDepartureV2 * arrivalAndDeparture = arrivals[indexPath.row];
-        OBAArrivalAndDepartureViewController * vc = [[OBAArrivalAndDepartureViewController alloc] initWithApplicationContext:_appContext arrivalAndDeparture:arrivalAndDeparture];
+        OBAArrivalAndDepartureViewController * vc = [[OBAArrivalAndDepartureViewController alloc] initWithApplicationDelegate:_appDelegate arrivalAndDeparture:arrivalAndDeparture];
         [self.navigationController pushViewController:vc animated:YES];
     }
 }
@@ -611,29 +836,37 @@ static const double kNearbyStopRadius = 200;
 - (void)tableView:(UITableView *)tableView didSelectActionRowAtIndexPath:(NSIndexPath *)indexPath {
     switch(indexPath.row) {
         case 0: {
-            OBABookmarkV2 * bookmark = [_appContext.modelDao createTransientBookmark:_result.stop];
-            
-            OBAEditStopBookmarkViewController * vc = [[OBAEditStopBookmarkViewController alloc] initWithApplicationContext:_appContext bookmark:bookmark editType:OBABookmarkEditNew];
+            OBAEditStopBookmarkViewController * vc = nil;
+            OBABookmarkV2 * bookmark = [self existingBookmark];
+            if (!bookmark) {
+                bookmark = [_appDelegate.modelDao createTransientBookmark:_result.stop];
+                
+                vc = [[OBAEditStopBookmarkViewController alloc] initWithApplicationDelegate:_appDelegate bookmark:bookmark editType:OBABookmarkEditNew];
+            } else {
+                vc = [[OBAEditStopBookmarkViewController alloc] initWithApplicationDelegate:_appDelegate bookmark:bookmark editType:OBABookmarkEditExisting];
+            }
             [self.navigationController pushViewController:vc animated:YES];
             
             break;
         }
         case 1: {
-            OBAEditStopPreferencesViewController * vc = [[OBAEditStopPreferencesViewController alloc] initWithApplicationContext:_appContext stop:_result.stop];
+            OBAReportProblemViewController * vc = [[OBAReportProblemViewController alloc] initWithApplicationDelegate:_appDelegate stop:_result.stop];
             [self.navigationController pushViewController:vc animated:YES];
             break;
         }
-
         case 2: {
+            [self openURLS];
+            break;
+        }
+        case 3: {
             NSArray * situations = _result.situations;
-            [OBAPresentation showSituations:situations withAppContext:_appContext navigationController:self.navigationController args:nil];
+            [OBAPresentation showSituations:situations withappDelegate:_appDelegate navigationController:self.navigationController args:nil];
             break;
         }
 
-        case 3: {
-            OBAReportProblemViewController * vc = [[OBAReportProblemViewController alloc] initWithApplicationContext:_appContext stop:_result.stop];
+        case 4: {
+            OBAEditStopPreferencesViewController * vc = [[OBAEditStopPreferencesViewController alloc] initWithApplicationDelegate:_appDelegate stop:_result.stop];
             [self.navigationController pushViewController:vc animated:YES];
-            
             break;
         }
     }
@@ -664,7 +897,7 @@ NSComparisonResult predictedArrivalSortByRoute(id o1, id o2, void * context) {
 
 - (void) reloadData {
         
-    OBAModelDAO * modelDao = _appContext.modelDao;
+    OBAModelDAO * modelDao = _appDelegate.modelDao;
     
     OBAStopV2 * stop = _result.stop;
     
@@ -677,13 +910,20 @@ NSComparisonResult predictedArrivalSortByRoute(id o1, id o2, void * context) {
         [self.mapView oba_setCenterCoordinate:CLLocationCoordinate2DMake(stop.lat, stop.lon) zoomLevel:15 animated:NO];
         self.stopName.text = stop.name;
         if (stop.direction) {
-            self.stopNumber.text = [NSString stringWithFormat:@"%@ # %@ - %@ %@",NSLocalizedString(@"Stop",@"text"),stop.code,stop.direction,NSLocalizedString(@"bound",@"text")];
+            self.stopNumber.text = [NSString stringWithFormat:@"%@ #%@ - %@ %@",NSLocalizedString(@"Stop",@"text"),stop.code,stop.direction,NSLocalizedString(@"bound",@"text")];
         }
         else {
-           self.stopNumber.text = [NSString stringWithFormat:@"%@ # %@",NSLocalizedString(@"Stop",@"text"),stop.code];
+            self.stopNumber.text = [NSString stringWithFormat:@"%@ #%@",NSLocalizedString(@"Stop",@"text"),stop.code];
+   
         }
+
+        
+        if (stop.routeNamesAsString) 
+            self.stopRoutes.text = [stop routeNamesAsString];
+        
         [_mapView addAnnotation:stop];
 
+        self.stopInfoButton.hidden = NO;
     }
     
     if (stop && predictedArrivals) {

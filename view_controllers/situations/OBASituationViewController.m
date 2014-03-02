@@ -44,10 +44,10 @@ typedef enum {
 #pragma mark -
 #pragma mark Initialization
 
-- (id) initWithApplicationContext:(OBAApplicationDelegate*)appContext situation:(OBASituationV2*)situation {
+- (id) initWithApplicationDelegate:(OBAApplicationDelegate*)appDelegate situation:(OBASituationV2*)situation {
     
     if (self = [super initWithStyle:UITableViewStyleGrouped]) {
-        _appContext = appContext;
+        _appDelegate = appDelegate;
         _situation = situation;
         
         NSString * diversionPath = nil;
@@ -62,7 +62,7 @@ typedef enum {
             _diversionPath = diversionPath;
 
         // Mark the situation as visited
-        OBAModelDAO * modelDao = _appContext.modelDao;
+        OBAModelDAO * modelDao = _appDelegate.modelDao;
         [modelDao setVisited:YES forSituationWithId:_situation.situationId];
     }
     
@@ -74,6 +74,15 @@ typedef enum {
     [super viewDidLoad];
     self.tableView.backgroundView = nil;
     self.tableView.backgroundColor = [UIColor whiteColor];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [TestFlight passCheckpoint:[NSString stringWithFormat:@"View: %@", [self class]]];
+    [[GAI sharedInstance].defaultTracker set:kGAIScreenName
+                                       value:[NSString stringWithFormat:@"View: %@", [self class]]];
+    [[GAI sharedInstance].defaultTracker
+     send:[[GAIDictionaryBuilder createAppView] build]];
 }
 
 #pragma mark -
@@ -209,7 +218,7 @@ typedef enum {
 
 - (UITableViewCell*) tableView:(UITableView*)tableView markAsReadCellForRowAtIndexPath:(NSIndexPath *)indexPath {
     
-    OBAModelDAO * modelDao = _appContext.modelDao;
+    OBAModelDAO * modelDao = _appDelegate.modelDao;
     BOOL isRead = [modelDao isVisitedSituationWithId:_situation.situationId];
 
     UITableViewCell * cell = [UITableViewCell getOrCreateCellForTableView:tableView];
@@ -226,7 +235,7 @@ typedef enum {
         [OBAWebViewController pushOntoViewController:self withHtml:[self getDetails:YES] withTitle:NSLocalizedString(@"Details",@"withTitle")];
     }
     else if( indexPath.row == 1 && _diversionPath ) {
-        OBADiversionViewController * vc = [OBADiversionViewController loadFromNibWithAppContext:_appContext];
+        OBADiversionViewController * vc = [OBADiversionViewController loadFromNibWithappDelegate:_appDelegate];
         vc.diversionPath = _diversionPath;
         vc.args = self.args;
         [self.navigationController pushViewController:vc animated:YES];        
@@ -235,7 +244,7 @@ typedef enum {
 
 - (void) didSelectMarkAsReadRowAtIndexPath:(NSIndexPath *)indexPath tableView:(UITableView *)tableView {
 
-    OBAModelDAO * modelDao = _appContext.modelDao;
+    OBAModelDAO * modelDao = _appDelegate.modelDao;
     BOOL isRead = ! [modelDao isVisitedSituationWithId:_situation.situationId];
     [modelDao setVisited:isRead forSituationWithId:_situation.situationId];
     

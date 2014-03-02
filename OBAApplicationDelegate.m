@@ -32,9 +32,17 @@
 
 #import "OBARegionListViewController.h"
 #import "OBARegionHelper.h"
+#import "OBAReleaseNotesManager.h"
+
+#import "TestFlight.h"
 
 static NSString * kOBAHiddenPreferenceUserId = @"OBAApplicationUserId";
+static NSString * kOBASelectedTabIndexDefaultsKey = @"OBASelectedTabIndexDefaultsKey";
+static NSString * kOBAShowExperimentalRegionsDefaultsKey = @"kOBAShowExperimentalRegionsDefaultsKey";
 static NSString * kOBADefaultRegionApiServerName = @"regions.onebusaway.org";
+static NSString *const kTrackingId = @"UA-2423527-17";
+static NSString *const kAllowTracking = @"allowTracking";
+static BOOL const kGaDryRun = NO;
 
 @interface OBAApplicationDelegate ()
 @property(nonatomic,readwrite) BOOL active;
@@ -49,6 +57,7 @@ static NSString * kOBADefaultRegionApiServerName = @"regions.onebusaway.org";
 - (NSString *)userIdFromDefaults:(NSUserDefaults*)userDefaults;
 - (void) _migrateUserPreferences;
 - (NSString *)applicationDocumentsDirectory;
+- (void)_updateSelectedTabIndex;
 @end
 
 @implementation OBAApplicationDelegate
@@ -88,7 +97,7 @@ static NSString * kOBADefaultRegionApiServerName = @"regions.onebusaway.org";
 - (void)refreshSettings {
     
     NSUserDefaults * userDefaults = [NSUserDefaults standardUserDefaults];
-    NSString *apiServerName = nil;
+    NSString * apiServerName = nil;
 	if([self.modelDao.readCustomApiUrl isEqualToString:@""]) {
         if (_modelDao.region != nil) {
             apiServerName = [NSString stringWithFormat:@"%@", _modelDao.region.obaBaseUrl];
@@ -108,8 +117,6 @@ static NSString * kOBADefaultRegionApiServerName = @"regions.onebusaway.org";
             apiServerName = [apiServerName substringToIndex:[apiServerName length]-1];
         }
     }
-    NSLog(@"%@",apiServerName);
-
     
     NSString * userId = [self userIdFromDefaults:userDefaults];
     NSString * appVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"];
@@ -119,7 +126,7 @@ static NSString * kOBADefaultRegionApiServerName = @"regions.onebusaway.org";
     OBAJsonDataSource * obaJsonDataSource = [[OBAJsonDataSource alloc] initWithConfig:obaDataSourceConfig];
     _modelService.obaJsonDataSource = obaJsonDataSource;
     
-    OBADataSourceConfig * googleMapsDataSourceConfig = [[OBADataSourceConfig alloc] initWithUrl:@"http://maps.google.com" args:@"output=json&oe=utf-8&key=ABQIAAAA1R_R0bUhLYRwbQFpKHVowhRAXGY6QyK0faTs-0G7h9EE_iri4RRtKgRdKFvvraEP5PX_lP_RlqKkzA"];
+    OBADataSourceConfig * googleMapsDataSourceConfig = [[OBADataSourceConfig alloc] initWithUrl:@"https://maps.googleapis.com" args:@"&sensor=true"];
     OBAJsonDataSource * googleMapsJsonDataSource = [[OBAJsonDataSource alloc] initWithConfig:googleMapsDataSourceConfig];
     _modelService.googleMapsJsonDataSource = googleMapsJsonDataSource;
     
@@ -146,29 +153,36 @@ static NSString * kOBADefaultRegionApiServerName = @"regions.onebusaway.org";
     self.tabBarController = [[UITabBarController alloc] init];
 
     self.mapViewController = [[OBASearchResultsMapViewController alloc] init];
-    self.mapViewController.appContext = self;
+    self.mapViewController.appDelegate = self;
     self.mapNavigationController = [[UINavigationController alloc] initWithRootViewController:self.mapViewController];
     
     self.recentsViewController = [[OBARecentStopsViewController alloc] init];
-    self.recentsViewController.appContext = self;
+    self.recentsViewController.appDelegate = self;
     self.recentsNavigationController = [[UINavigationController alloc] initWithRootViewController:self.recentsViewController];
 
     self.bookmarksViewController = [[OBABookmarksViewController alloc] init];
-    self.bookmarksViewController.appContext = self;
+    self.bookmarksViewController.appDelegate = self;
     self.bookmarksNavigationController = [[UINavigationController alloc] initWithRootViewController:self.bookmarksViewController];
     
     self.infoViewController = [[OBAInfoViewController alloc] init];
     self.infoNavigationController = [[UINavigationController alloc] initWithRootViewController:self.infoViewController];
 
     self.tabBarController.viewControllers = @[self.mapNavigationController, self.recentsNavigationController, self.bookmarksNavigationController, self.infoNavigationController];
+    self.tabBarController.delegate = self;
 
-    self.tabBarController.selectedIndex = 0;
+    [self _updateSelectedTabIndex];
     
-    UIColor *tintColor = [UIColor colorWithHue:(86./360.) saturation:0.68 brightness:0.67 alpha:1];
+    UIColor *tintColor = OBAGREEN;
     [[UINavigationBar appearance] setTintColor:tintColor];
     [[UISearchBar appearance] setTintColor:tintColor];
     [[UISegmentedControl appearance] setTintColor:tintColor];
     [[UITabBar appearance] setSelectedImageTintColor:tintColor];
+    if (SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(@"7.0")) {
+        [[UITabBar appearance] setTintColor:tintColor];
+        [[UITextField appearance] setTintColor:tintColor];
+        [[UISegmentedControl appearance] setTitleTextAttributes:@{UITextAttributeTextColor: [UIColor whiteColor]} forState:UIControlStateNormal];
+        [[UISegmentedControl appearance] setTitleTextAttributes:@{UITextAttributeTextColor: [UIColor whiteColor]} forState:UIControlStateSelected];
+    }
     
     self.window.rootViewController = self.tabBarController;
     
@@ -181,14 +195,44 @@ static NSString * kOBADefaultRegionApiServerName = @"regions.onebusaway.org";
         }
     }
 
-
-
     [self.window makeKeyAndVisible];
+
+    if ([OBAReleaseNotesManager shouldShowReleaseNotes]) {
+        [OBAReleaseNotesManager showReleaseNotes:self.window];
+    }
 }
 
 #pragma mark UIApplicationDelegate Methods
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+#ifdef DEBUG
+    // if beta testing use token for org.onebusaway.iphone.dev
+    [TestFlight takeOff:@"1329bac8-596e-4c80-a180-31aad3eb676a"];
+    NSLog(@"Debug app");
+    static BOOL const kGaDryRun = YES;
+    //ULog(@"Debug app");
+#else
+    // if app store version use token for org.onebusaway.iphone
+    [TestFlight takeOff:@"28959455-6425-40fb-a08c-204cb2a80421"];
+    NSLog(@"Production app");
+    static BOOL const kGaDryRun = NO;
+    //ULog(@"Production app");
+    
+#endif
+
+    NSDictionary *appDefaults = @{kAllowTracking: @(YES)};
+    [[NSUserDefaults standardUserDefaults] registerDefaults:appDefaults];
+    // User must be able to opt out of tracking
+    [GAI sharedInstance].optOut =
+    ![[NSUserDefaults standardUserDefaults] boolForKey:kAllowTracking];
+    // Initialize Google Analytics with a 120-second dispatch interval. There is a
+    // tradeoff between battery usage and timely dispatch.
+    [GAI sharedInstance].dispatchInterval = 120;
+    [GAI sharedInstance].trackUncaughtExceptions = YES;
+    [[[GAI sharedInstance] logger] setLogLevel:kGAILogLevelVerbose];
+    [[GAI sharedInstance] setDryRun:kGaDryRun];
+    
+    self.tracker = [[GAI sharedInstance] trackerWithTrackingId:kTrackingId];
     [self _migrateUserPreferences];
     [self _constructUI];
 
@@ -209,22 +253,48 @@ static NSString * kOBADefaultRegionApiServerName = @"regions.onebusaway.org";
 
 - (void)applicationDidBecomeActive:(UIApplication *)application {
     self.active = YES;
+    self.tabBarController.selectedIndex = [[NSUserDefaults standardUserDefaults] integerForKey:kOBASelectedTabIndexDefaultsKey];
+    [GAI sharedInstance].optOut =
+    ![[NSUserDefaults standardUserDefaults] boolForKey:kAllowTracking];
 }
 
 - (void)applicationWillResignActive:(UIApplication *)application {
+    if([self.modelDao.readCustomApiUrl isEqualToString:@""]) {
+        [TestFlight passCheckpoint:[NSString stringWithFormat:@"API Region: %@",self.modelDao.region.regionName]];
+        [[GAI sharedInstance].defaultTracker
+         send:[[GAIDictionaryBuilder createEventWithCategory:@"app_settings"
+                                                      action:@"configured_region"
+                                                       label:[NSString stringWithFormat:@"API Region: %@",self.modelDao.region.regionName]
+                                                       value:nil] build]];
+    }else{
+        [TestFlight passCheckpoint:[NSString stringWithFormat:@"API Region: %@",self.modelDao.readCustomApiUrl]];
+        [[GAI sharedInstance].defaultTracker
+         send:[[GAIDictionaryBuilder createEventWithCategory:@"app_settings"
+                                                      action:@"configured_region"
+                                                       label:[NSString stringWithFormat:@"API Region: %@",self.modelDao.readCustomApiUrl]
+                                                       value:nil] build]];
+    }
+    [[GAI sharedInstance].defaultTracker set:kGAIScreenName
+                                       value:nil];
     self.active = NO;
 }
 
+#pragma mark - UITabBarControllerDelegate
 
-
-/*
-#pragma mark IASKSettingsDelegate
-
-- (void)settingsViewControllerDidEnd:(IASKAppSettingsViewController*)sender {
-    [self refreshSettings];
-    
+- (void)tabBarController:(UITabBarController *)tabBarController didSelectViewController:(UIViewController *)viewController {
+    [[NSUserDefaults standardUserDefaults] setInteger:tabBarController.selectedIndex forKey:kOBASelectedTabIndexDefaultsKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
 }
-*/
+
+- (void)_updateSelectedTabIndex {
+    NSInteger selectedIndex = 0;
+
+    if ([[NSUserDefaults standardUserDefaults] objectForKey:kOBASelectedTabIndexDefaultsKey]) {
+        selectedIndex = [[NSUserDefaults standardUserDefaults] integerForKey:kOBASelectedTabIndexDefaultsKey];
+    }
+    self.tabBarController.selectedIndex = selectedIndex;
+}
+
 - (void) _navigateToTargetInternal:(OBANavigationTarget*)navigationTarget {
     
     [_references clear];
@@ -237,15 +307,15 @@ static NSString * kOBADefaultRegionApiServerName = @"regions.onebusaway.org";
     }
     else if (OBANavigationTargetTypeContactUs == navigationTarget.target) {
         [self.tabBarController setSelectedViewController:self.infoNavigationController];
-        [self.infoViewController tableView:self.infoViewController.tableView didSelectRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]];
+        [self.infoViewController openContactUs];
     }
     else if (OBANavigationTargetTypeSettings == navigationTarget.target) {
         [self.tabBarController setSelectedViewController:self.infoNavigationController];
-        [self.infoViewController tableView:self.infoViewController.tableView didSelectRowAtIndexPath:[NSIndexPath indexPathForRow:1 inSection:0]];
+        [self.infoViewController openSettings];
     }
     else if (OBANavigationTargetTypeAgencies == navigationTarget.target) {
         [self.tabBarController setSelectedViewController:self.infoNavigationController];
-        [self.infoViewController tableView:self.infoViewController.tableView didSelectRowAtIndexPath:[NSIndexPath indexPathForRow:2 inSection:0]];
+        [self.infoViewController openAgencies];
     }
     else if (OBANavigationTargetTypeBookmarks == navigationTarget.target) {
         [self.tabBarController setSelectedViewController:self.bookmarksNavigationController];
@@ -270,7 +340,7 @@ static NSString * kOBADefaultRegionApiServerName = @"regions.onebusaway.org";
     
     switch (target.target) {
         case OBANavigationTargetTypeStop:
-            return [[OBAStopViewController alloc] initWithApplicationContext:self];
+            return [[OBAStopViewController alloc] initWithApplicationDelegate:self];
         default:
             return nil;
     }
@@ -317,7 +387,7 @@ static NSString * kOBADefaultRegionApiServerName = @"regions.onebusaway.org";
 
 - (void) showRegionListViewController
 {
-    _regionListViewController = [[OBARegionListViewController alloc] initWithApplicationContext:self];
+    _regionListViewController = [[OBARegionListViewController alloc] initWithApplicationDelegate:self];
     _regionNavigationController = [[UINavigationController alloc] initWithRootViewController:_regionListViewController];
 
     self.window.rootViewController = _regionNavigationController;
